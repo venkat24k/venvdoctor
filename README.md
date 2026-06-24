@@ -86,19 +86,18 @@ VenvDoctor fills that gap.
 
 ## Environment Dashboard
 
-![Environment Dashboard](docs/screenshots/dashboard.png)
+![Environment Dashboard](docs/screenshots/dashboard_1.png)
+
+![Environment Dashboard](docs/screenshots/dashboard_2.png)
 
 ---
 
 ## Duplicate Storage Dashboard
 
-![Duplicate Dashboard](docs/screenshots/duplicates-dashboard.png)
+![Duplicate Dashboard](docs/screenshots/duplicates_dashboard_1.png)
 
----
+![Duplicate Dashboard](docs/screenshots/duplicates_dashboard_2.png)
 
-## Multi-Venv Scan
-
-![Multi-Venv Scan](docs/screenshots/scan.png)
 
 ---
 
@@ -432,47 +431,13 @@ CLI Interface (cli.py)
 
 # Roadmap
 
-## Completed
-
-* [x] Environment analysis
-* [x] Package size analysis
-* [x] Environment size calculation
-* [x] Package inspection
-* [x] Dependency tree visualization
-* [x] Dependency impact analysis
-* [x] JSON export
-* [x] CSV export
-* [x] HTML dashboard generation
-* [x] Duplicate package detection
-* [x] Duplicate storage dashboard
-* [x] Outdated package detection
-* [x] Multi-environment scanning
-* [x] Cleanup recommendations
-
 ## Planned
 
-* [ ] PyPI release
-* [ ] Security auditing
-* [ ] Environment comparison
-* [ ] Historical environment tracking
-* [ ] Interactive dashboard mode
+Future Enhancements
 
----
-
-# Contributing
-
-Contributions, bug reports, and feature requests are welcome.
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Open a pull request
-
----
-
-# License
-
-MIT License
+- Environment comparison
+- Interactive dashboard mode
+- Export duplicate analysis to JSON/CSV
 
 ---
 
