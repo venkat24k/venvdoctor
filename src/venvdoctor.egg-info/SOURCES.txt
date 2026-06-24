@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-src/venvdoctor/__init__.py
-src/venvdoctor/cli.py
-src/venvdoctor.egg-info/PKG-INFO
-src/venvdoctor.egg-info/SOURCES.txt
-src/venvdoctor.egg-info/dependency_links.txt
-src/venvdoctor.egg-info/entry_points.txt
-src/venvdoctor.egg-info/top_level.txt

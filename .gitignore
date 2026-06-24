@@ -1,0 +1,23 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Build artifacts
+build/
+dist/
+
+# Package metadata
+*.egg-info/
+.eggs/
+
+# Generated reports
+*.json
+*.csv
+*.html
+
+# VS Code
+.vscode/
