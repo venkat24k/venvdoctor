@@ -5,7 +5,7 @@ Check for outdated packages by querying the PyPI JSON API.
 
 Public API
 ----------
-check_outdated(packages, verbose) -> list[dict]
+check_outdated(packages, verbose=False, use_cache=True) -> (list[dict], list[str])
 """
 
 from __future__ import annotations
@@ -16,12 +16,16 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 _PYPI_URL = "https://pypi.org/pypi/{name}/json"
 _TIMEOUT  = 5    # seconds per request
 _WORKERS  = 8    # concurrent requests
 _RETRIES  = 1    # extra attempts after a transient network failure
 _RETRY_DELAY = 0.5  # seconds between retries
+
+_CACHE_PATH = Path.home() / ".venvdoctor" / "pypi_cache.json"
+_CACHE_TTL  = 24 * 3600  # how long a cached "latest version" stays valid
 
 
 # ---------------------------------------------------------------------------
@@ -31,9 +35,17 @@ _RETRY_DELAY = 0.5  # seconds between retries
 def check_outdated(
     packages: list[dict],
     verbose: bool = False,
+    use_cache: bool = True,
 ) -> tuple[list[dict], list[str]]:
     """
     Compare installed package versions against the latest on PyPI.
+
+    Results are cached per package name (not per installed version, since
+    "latest on PyPI" doesn't depend on what's installed locally) at
+    ~/.venvdoctor/pypi_cache.json for _CACHE_TTL seconds, so repeated runs
+    don't re-query PyPI for packages checked recently. Only the main
+    thread touches the cache dict, so no locking is needed despite the
+    concurrent lookups.
 
     Returns
     -------
@@ -43,29 +55,32 @@ def check_outdated(
       failed: names of packages whose PyPI lookup failed after retries
         (e.g. network/timeout issues) — NOT the same as "up to date".
     """
-    results: list[dict] = []
-    failed: list[str] = []
+    cache = _load_cache() if use_cache else {}
+    now = time.time()
 
-    def _check(pkg: dict) -> tuple[dict | None, str | None]:
+    def _check(pkg: dict) -> dict | None:
         name      = pkg["name"]
         installed = pkg.get("version", "")
         if not installed or installed == "unknown":
-            return None, None
+            return None
+
+        key = name.lower()
+        cached = cache.get(key)
+        if cached and (now - cached.get("checked_at", 0)) < _CACHE_TTL:
+            return {
+                "name": name, "installed": installed, "latest": cached.get("latest"),
+                "size_bytes": pkg["size_bytes"], "lookup_failed": False, "from_cache": True,
+            }
 
         latest, lookup_failed = _pypi_latest(name)
-        if lookup_failed:
-            return None, name
-        if latest is None:
-            return None, None
+        return {
+            "name": name, "installed": installed, "latest": latest,
+            "size_bytes": pkg["size_bytes"], "lookup_failed": lookup_failed, "from_cache": False,
+        }
 
-        if _is_outdated(installed, latest):
-            return {
-                "name":      name,
-                "installed": installed,
-                "latest":    latest,
-                "size_bytes": pkg["size_bytes"],
-            }, None
-        return None, None
+    results: list[dict] = []
+    failed: list[str] = []
+    cache_updates: dict[str, dict] = {}
 
     with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
         futures = {pool.submit(_check, pkg): pkg for pkg in packages}
@@ -75,14 +90,36 @@ def check_outdated(
             done += 1
             if verbose:
                 print(f"\r  Checking {done}/{total}…", end="", flush=True)
-            result, failed_name = future.result()
-            if result:
-                results.append(result)
-            if failed_name:
-                failed.append(failed_name)
+
+            outcome = future.result()
+            if outcome is None:
+                continue
+            if outcome["lookup_failed"]:
+                failed.append(outcome["name"])
+                continue
+            if outcome["latest"] is None:
+                continue
+
+            if not outcome["from_cache"]:
+                cache_updates[outcome["name"].lower()] = {
+                    "latest": outcome["latest"],
+                    "checked_at": now,
+                }
+
+            if _is_outdated(outcome["installed"], outcome["latest"]):
+                results.append({
+                    "name":      outcome["name"],
+                    "installed": outcome["installed"],
+                    "latest":    outcome["latest"],
+                    "size_bytes": outcome["size_bytes"],
+                })
 
     if verbose:
         print()  # newline after progress
+
+    if use_cache and cache_updates:
+        cache.update(cache_updates)
+        _save_cache(cache)
 
     results.sort(key=lambda r: r["name"].lower())
     failed.sort(key=str.lower)
@@ -92,6 +129,20 @@ def check_outdated(
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
+
+def _load_cache() -> dict:
+    try:
+        return json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    try:
+        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+    except OSError:
+        pass  # caching is a best-effort optimization, not required for correctness
 
 def _pypi_latest(name: str) -> tuple[str | None, bool]:
     """

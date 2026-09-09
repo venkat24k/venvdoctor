@@ -41,6 +41,16 @@ def test_find_venvs_skips_noise_directories(tmp_path):
     assert found == []
 
 
+def test_find_venvs_skips_extra_ignore_dirs(tmp_path):
+    venv_dir = _make_venv(tmp_path / "archive", "venv")
+
+    found_without_ignore = find_venvs(tmp_path)
+    assert venv_dir.resolve() in found_without_ignore
+
+    found_with_ignore = find_venvs(tmp_path, extra_ignore=("archive",))
+    assert found_with_ignore == []
+
+
 def test_duplicate_packages_only_returns_packages_in_2plus_envs():
     summaries = [
         {

@@ -283,6 +283,27 @@ Package             Installed    Latest
 pip                   26.0.1     26.1.2
 ```
 
+Results are cached locally (`~/.venvdoctor/pypi_cache.json`, 24h TTL) so repeat runs don't re-query PyPI for packages checked recently. Force a fresh check with:
+
+```bash
+venvdoctor --outdated --no-cache
+```
+
+---
+
+## Dependency Drift Check
+
+Compare installed packages against what's actually declared in `requirements.txt` or `pyproject.toml`, using the full transitive-dependency closure so indirect dependencies (e.g. numpy pulled in by pandas) aren't falsely flagged.
+
+```bash
+venvdoctor --check-deps --project "D:\Projects\MyApp"
+```
+
+Reports:
+
+* **Orphaned** — installed but not reachable from any declared dependency
+* **Missing** — declared but not installed
+
 ---
 
 # Multi-Environment Analysis
@@ -308,6 +329,8 @@ venvdoctor\venv           11.05 MB
 
 Total Storage Used: 4.97 GB
 ```
+
+Conda environments (detected via `conda-meta/`) are supported alongside regular venvs: pip-installable packages are read the same way, and conda-only packages with no pip metadata (compiled libraries like `openssl`, `mkl`, `sqlite`) are picked up from `conda-meta/*.json` so they aren't silently missing from the size/package totals.
 
 ---
 
@@ -454,6 +477,22 @@ CLI Interface (cli.py)
 
 ---
 
+# Configuration
+
+Set defaults so routine commands don't need to repeat flags. Create `.venvdoctor.toml` in the current directory (or `~/.venvdoctor.toml` for a global default) — requires Python 3.11+:
+
+```toml
+top = 15
+days_old = 30
+ignore_dirs = ["archive", "backups"]
+```
+
+* `top` — default for `--top`
+* `days_old` — default for `scan --cleanup --days-old`
+* `ignore_dirs` — extra directory names for `scan` to skip while searching
+
+---
+
 # Development
 
 Install with dev dependencies (pytest, ruff) and run the test suite / linter:
@@ -478,6 +517,10 @@ Future Enhancements
 
 - Environment comparison (`venvdoctor compare`)
 - Export duplicate analysis to JSON/CSV (`--duplicates-report`)
+- Conda environment support (`conda-meta` packages)
+- Dependency drift check against requirements.txt/pyproject.toml (`--check-deps`)
+- PyPI lookup caching for `--outdated`
+- Config file for default options (`.venvdoctor.toml`)
 
 ---
 

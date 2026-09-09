@@ -23,6 +23,10 @@ venvdoctor scan PATH --duplicates-html FILE    # save duplicate HTML dashboard
 venvdoctor scan PATH --duplicates-report FILE  # save duplicate report (.json/.csv)
 venvdoctor scan PATH --cleanup      # suggest old / large venvs to remove
 venvdoctor compare VENV_A VENV_B    # diff installed packages between two venvs
+venvdoctor --check-deps --project PATH  # compare installed vs requirements.txt/pyproject.toml
+
+Defaults for --top, --days-old, and scan's ignored directories can be set
+in a .venvdoctor.toml file (see config.py).
 """
 
 from __future__ import annotations
@@ -32,9 +36,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from .config import load_config
 from .formatters import human_size, to_csv, to_html, to_json
 from .formatters_duplicates import to_duplicates_csv, to_duplicates_html, to_duplicates_json
 from .package_analyzer import get_dependency_tree, get_package_detail, get_package_sizes
+from .requirements import compute_dependency_drift, find_declared_dependencies
 from .scanner import cleanup_candidates, compare_venvs, duplicate_packages, scan_all
 from .tree import largest_deps, print_tree
 
@@ -326,7 +332,7 @@ def cmd_outdated(args) -> None:
     _header("Checking for Outdated Packages")
     print(f"  Querying PyPI for {len(packages)} packages (this may take a moment)…\n")
 
-    results, failed = check_outdated(packages, verbose=True)
+    results, failed = check_outdated(packages, verbose=True, use_cache=not args.no_cache)
 
     if not results:
         print("  ✅ All packages are up to date!")
@@ -344,6 +350,49 @@ def cmd_outdated(args) -> None:
         )
 
 
+# ── check-deps ──────────────────────────────────────────────────────────────
+
+def cmd_check_deps(args) -> None:
+    """Compare installed packages against declared requirements/pyproject deps."""
+    venv_path = _resolve_venv(args)
+    project_root = Path(args.project) if args.project else Path.cwd()
+
+    declared, sources = find_declared_dependencies(project_root)
+    if not declared:
+        print(
+            f"[error] No dependencies found in requirements.txt or pyproject.toml "
+            f"under: {project_root}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        tree = get_dependency_tree(venv_path)
+    except FileNotFoundError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    drift = compute_dependency_drift(tree, declared)
+
+    _header("Dependency Drift Check")
+    print(f"  Declared dependencies: {len(declared)}  (from {', '.join(sources)})")
+
+    orphaned_count = len(drift["orphaned"])
+    _header(f"Orphaned — installed but not required by any declared package ({orphaned_count})")
+    if not drift["orphaned"]:
+        print("  None — every installed package is reachable from a declared dependency.")
+    else:
+        for name in drift["orphaned"]:
+            print(f"  {name}")
+
+    _header(f"Missing — declared but not installed ({len(drift['missing'])})")
+    if not drift["missing"]:
+        print("  None.")
+    else:
+        for name in drift["missing"]:
+            print(f"  {name}")
+
+
 # ── scan ────────────────────────────────────────────────────────────────────
 
 def cmd_scan(args) -> None:
@@ -356,7 +405,8 @@ def cmd_scan(args) -> None:
     print(f"\nScanning for virtual environments in: {root}")
     print("(This may take a moment…)\n")
 
-    summaries = scan_all(root)
+    ignore_dirs = tuple(load_config().get("ignore_dirs", []))
+    summaries = scan_all(root, extra_ignore=ignore_dirs)
 
     if not summaries:
         print("  No virtual environments found.")
@@ -514,6 +564,8 @@ def cmd_compare(args) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def build_parser() -> argparse.ArgumentParser:
+    config = load_config()
+
     parser = argparse.ArgumentParser(
         prog="venvdoctor",
         description="Analyse Python virtual environments.",
@@ -548,9 +600,9 @@ Examples:
     parser.add_argument(
         "--top",
         type=int,
-        default=10,
+        default=config.get("top", 10),
         metavar="N",
-        help="Number of top packages to show (default: 10).",
+        help="Number of top packages to show (default: 10, or 'top' in .venvdoctor.toml).",
     )
     parser.add_argument(
         "--json",
@@ -588,6 +640,25 @@ Examples:
         action="store_true",
         help="Check PyPI for outdated packages.",
     )
+    parser.add_argument(
+        "--no-cache",
+        dest="no_cache",
+        action="store_true",
+        help="Bypass the local PyPI lookup cache used by --outdated "
+        "(~/.venvdoctor/pypi_cache.json).",
+    )
+    parser.add_argument(
+        "--check-deps",
+        dest="check_deps",
+        action="store_true",
+        help="Compare installed packages against requirements.txt/pyproject.toml.",
+    )
+    parser.add_argument(
+        "--project",
+        metavar="PATH",
+        help="Project directory to read requirements.txt/pyproject.toml from "
+        "for --check-deps (default: current directory).",
+    )
 
     # ── scan sub-command ──
     sub = parser.add_subparsers(dest="subcommand")
@@ -619,9 +690,10 @@ Examples:
         "--days-old",
         dest="days_old",
         type=int,
-        default=90,
+        default=config.get("days_old", 90),
         metavar="N",
-        help="Days threshold for cleanup recommendations (default: 90).",
+        help="Days threshold for cleanup recommendations "
+        "(default: 90, or 'days_old' in .venvdoctor.toml).",
     )
 
     # ── compare sub-command ──
@@ -680,6 +752,10 @@ def main() -> None:
 
     if args.outdated:
         cmd_outdated(args)
+        return
+
+    if args.check_deps:
+        cmd_check_deps(args)
         return
 
     # ── Default: analyse ──

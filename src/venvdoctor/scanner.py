@@ -15,10 +15,13 @@ cleanup_candidates(summaries, days_old) -> list[dict]
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .formatters import human_size
 from .package_analyzer import get_package_sizes
+
+_SCAN_WORKERS = 8  # concurrent per-venv scans; scanning is I/O-bound (stat calls)
 
 # ---------------------------------------------------------------------------
 # Types
@@ -49,24 +52,38 @@ _VENV_MARKERS = frozenset([
     "conda-meta",            # Conda environments
 ])
 
+_DEFAULT_IGNORE_DIRS = frozenset([
+    "__pycache__", ".git", ".hg", ".svn",
+    "node_modules", ".tox", ".mypy_cache",
+    "dist", "build", ".eggs",
+])
 
-def find_venvs(root: str | Path, max_depth: int = 5) -> list[Path]:
+
+def find_venvs(
+    root: str | Path,
+    max_depth: int = 5,
+    extra_ignore: tuple[str, ...] = (),
+) -> list[Path]:
     """
     Recursively search *root* for virtual environment directories.
+
+    *extra_ignore* names (e.g. from a .venvdoctor.toml config) are skipped
+    in addition to the built-in noise directories.
 
     Returns a list of absolute Paths, each pointing to a venv root.
     """
     root = Path(root).expanduser().resolve()
+    ignore_dirs = _DEFAULT_IGNORE_DIRS | frozenset(extra_ignore)
     found: list[Path] = []
-    _walk(root, root, 0, max_depth, found)
+    _walk(root, 0, max_depth, ignore_dirs, found)
     return found
 
 
 def _walk(
     current: Path,
-    root: Path,
     depth: int,
     max_depth: int,
+    ignore_dirs: frozenset[str],
     found: list[Path],
 ) -> None:
     if depth > max_depth:
@@ -86,51 +103,55 @@ def _walk(
     for entry in entries:
         if not entry.is_dir():
             continue
-        # Skip common non-project dirs to keep scanning fast
-        if entry.name in {
-            "__pycache__", ".git", ".hg", ".svn",
-            "node_modules", ".tox", ".mypy_cache",
-            "dist", "build", ".eggs",
-        }:
+        if entry.name in ignore_dirs:
             continue
-        _walk(entry, root, depth + 1, max_depth, found)
+        _walk(entry, depth + 1, max_depth, ignore_dirs, found)
 
 
 # ---------------------------------------------------------------------------
 # Scanning
 # ---------------------------------------------------------------------------
 
-def scan_all(root: str | Path) -> list[VenvSummary]:
+def _scan_one(venv_path: Path) -> VenvSummary:
+    try:
+        packages = get_package_sizes(venv_path)
+    except Exception as exc:
+        packages = []
+        error = str(exc)
+    else:
+        error = None
+
+    total_bytes = sum(p["size_bytes"] for p in packages)
+    last_modified = _dir_mtime(venv_path)
+
+    return VenvSummary(
+        path=str(venv_path),
+        total_bytes=total_bytes,
+        total_size_human=human_size(total_bytes),
+        package_count=len(packages),
+        packages=packages,
+        last_modified=last_modified,
+        last_modified_days_ago=_days_ago(last_modified),
+        error=error,
+    )
+
+
+def scan_all(root: str | Path, extra_ignore: tuple[str, ...] = ()) -> list[VenvSummary]:
     """
     Find all virtual environments under *root* and return summary data.
 
+    Each venv is scanned concurrently (scanning is I/O-bound: mostly file
+    stat calls), so wall-clock time scales with the slowest venv rather
+    than the sum of all of them.
+
     Returns a list of VenvSummary dicts sorted by total_bytes descending.
     """
-    venvs = find_venvs(root)
-    summaries: list[VenvSummary] = []
+    venvs = find_venvs(root, extra_ignore=extra_ignore)
+    if not venvs:
+        return []
 
-    for venv_path in venvs:
-        try:
-            packages = get_package_sizes(venv_path)
-        except Exception as exc:
-            packages = []
-            error = str(exc)
-        else:
-            error = None
-
-        total_bytes = sum(p["size_bytes"] for p in packages)
-        last_modified = _dir_mtime(venv_path)
-
-        summaries.append(VenvSummary(
-            path=str(venv_path),
-            total_bytes=total_bytes,
-            total_size_human=human_size(total_bytes),
-            package_count=len(packages),
-            packages=packages,
-            last_modified=last_modified,
-            last_modified_days_ago=_days_ago(last_modified),
-            error=error,
-        ))
+    with ThreadPoolExecutor(max_workers=min(_SCAN_WORKERS, len(venvs))) as pool:
+        summaries = list(pool.map(_scan_one, venvs))
 
     summaries.sort(key=lambda s: s["total_bytes"], reverse=True)
     return summaries
