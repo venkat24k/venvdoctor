@@ -8,19 +8,20 @@ Public API
 find_venvs(root)                 -> list[Path]
 scan_all(root)                   -> list[VenvSummary]
 duplicate_packages(summaries)    -> dict[str, list[dict]]
+compare_venvs(venv_a, venv_b)    -> dict
 cleanup_candidates(summaries, days_old) -> list[dict]
 """
 
 from __future__ import annotations
 
-import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
 
-from .package_analyzer import get_package_sizes
 from .formatters import human_size
+from .package_analyzer import get_package_sizes
 
+_SCAN_WORKERS = 8  # concurrent per-venv scans; scanning is I/O-bound (stat calls)
 
 # ---------------------------------------------------------------------------
 # Types
@@ -51,24 +52,38 @@ _VENV_MARKERS = frozenset([
     "conda-meta",            # Conda environments
 ])
 
+_DEFAULT_IGNORE_DIRS = frozenset([
+    "__pycache__", ".git", ".hg", ".svn",
+    "node_modules", ".tox", ".mypy_cache",
+    "dist", "build", ".eggs",
+])
 
-def find_venvs(root: str | Path, max_depth: int = 5) -> list[Path]:
+
+def find_venvs(
+    root: str | Path,
+    max_depth: int = 5,
+    extra_ignore: tuple[str, ...] = (),
+) -> list[Path]:
     """
     Recursively search *root* for virtual environment directories.
+
+    *extra_ignore* names (e.g. from a .venvdoctor.toml config) are skipped
+    in addition to the built-in noise directories.
 
     Returns a list of absolute Paths, each pointing to a venv root.
     """
     root = Path(root).expanduser().resolve()
+    ignore_dirs = _DEFAULT_IGNORE_DIRS | frozenset(extra_ignore)
     found: list[Path] = []
-    _walk(root, root, 0, max_depth, found)
+    _walk(root, 0, max_depth, ignore_dirs, found)
     return found
 
 
 def _walk(
     current: Path,
-    root: Path,
     depth: int,
     max_depth: int,
+    ignore_dirs: frozenset[str],
     found: list[Path],
 ) -> None:
     if depth > max_depth:
@@ -88,51 +103,55 @@ def _walk(
     for entry in entries:
         if not entry.is_dir():
             continue
-        # Skip common non-project dirs to keep scanning fast
-        if entry.name in {
-            "__pycache__", ".git", ".hg", ".svn",
-            "node_modules", ".tox", ".mypy_cache",
-            "dist", "build", ".eggs",
-        }:
+        if entry.name in ignore_dirs:
             continue
-        _walk(entry, root, depth + 1, max_depth, found)
+        _walk(entry, depth + 1, max_depth, ignore_dirs, found)
 
 
 # ---------------------------------------------------------------------------
 # Scanning
 # ---------------------------------------------------------------------------
 
-def scan_all(root: str | Path) -> list[VenvSummary]:
+def _scan_one(venv_path: Path) -> VenvSummary:
+    try:
+        packages = get_package_sizes(venv_path)
+    except Exception as exc:
+        packages = []
+        error = str(exc)
+    else:
+        error = None
+
+    total_bytes = sum(p["size_bytes"] for p in packages)
+    last_modified = _dir_mtime(venv_path)
+
+    return VenvSummary(
+        path=str(venv_path),
+        total_bytes=total_bytes,
+        total_size_human=human_size(total_bytes),
+        package_count=len(packages),
+        packages=packages,
+        last_modified=last_modified,
+        last_modified_days_ago=_days_ago(last_modified),
+        error=error,
+    )
+
+
+def scan_all(root: str | Path, extra_ignore: tuple[str, ...] = ()) -> list[VenvSummary]:
     """
     Find all virtual environments under *root* and return summary data.
 
+    Each venv is scanned concurrently (scanning is I/O-bound: mostly file
+    stat calls), so wall-clock time scales with the slowest venv rather
+    than the sum of all of them.
+
     Returns a list of VenvSummary dicts sorted by total_bytes descending.
     """
-    venvs = find_venvs(root)
-    summaries: list[VenvSummary] = []
+    venvs = find_venvs(root, extra_ignore=extra_ignore)
+    if not venvs:
+        return []
 
-    for venv_path in venvs:
-        try:
-            packages = get_package_sizes(venv_path)
-        except Exception as exc:
-            packages = []
-            error = str(exc)
-        else:
-            error = None
-
-        total_bytes = sum(p["size_bytes"] for p in packages)
-        last_modified = _dir_mtime(venv_path)
-
-        summaries.append(VenvSummary(
-            path=str(venv_path),
-            total_bytes=total_bytes,
-            total_size_human=human_size(total_bytes),
-            package_count=len(packages),
-            packages=packages,
-            last_modified=last_modified,
-            last_modified_days_ago=_days_ago(last_modified),
-            error=error,
-        ))
+    with ThreadPoolExecutor(max_workers=min(_SCAN_WORKERS, len(venvs))) as pool:
+        summaries = list(pool.map(_scan_one, venvs))
 
     summaries.sort(key=lambda s: s["total_bytes"], reverse=True)
     return summaries
@@ -169,6 +188,74 @@ def duplicate_packages(
             })
 
     return {name: entries for name, entries in index.items() if len(entries) > 1}
+
+
+# ---------------------------------------------------------------------------
+# Environment comparison
+# ---------------------------------------------------------------------------
+
+def compare_venvs(venv_a: str | Path, venv_b: str | Path) -> dict:
+    """
+    Compare the installed packages of two virtual environments.
+
+    Raises
+    ------
+    FileNotFoundError  if either path is not a valid virtual environment
+    (propagated from get_package_sizes).
+    """
+    venv_a = Path(venv_a)
+    venv_b = Path(venv_b)
+
+    pkgs_a = {p["name"]: p for p in get_package_sizes(venv_a)}
+    pkgs_b = {p["name"]: p for p in get_package_sizes(venv_b)}
+
+    names_a = set(pkgs_a)
+    names_b = set(pkgs_b)
+
+    only_in_a = [
+        {
+            "name": n,
+            "version": pkgs_a[n].get("version", "unknown"),
+            "size_bytes": pkgs_a[n]["size_bytes"],
+        }
+        for n in sorted(names_a - names_b)
+    ]
+    only_in_b = [
+        {
+            "name": n,
+            "version": pkgs_b[n].get("version", "unknown"),
+            "size_bytes": pkgs_b[n]["size_bytes"],
+        }
+        for n in sorted(names_b - names_a)
+    ]
+
+    common_same_version: list[dict] = []
+    common_version_mismatch: list[dict] = []
+    for name in sorted(names_a & names_b):
+        version_a = pkgs_a[name].get("version", "unknown")
+        version_b = pkgs_b[name].get("version", "unknown")
+        entry = {
+            "name": name,
+            "version_a": version_a,
+            "version_b": version_b,
+            "size_bytes_a": pkgs_a[name]["size_bytes"],
+            "size_bytes_b": pkgs_b[name]["size_bytes"],
+        }
+        if version_a == version_b:
+            common_same_version.append(entry)
+        else:
+            common_version_mismatch.append(entry)
+
+    return {
+        "venv_a": str(venv_a),
+        "venv_b": str(venv_b),
+        "only_in_a": only_in_a,
+        "only_in_b": only_in_b,
+        "common_same_version": common_same_version,
+        "common_version_mismatch": common_version_mismatch,
+        "total_bytes_a": sum(p["size_bytes"] for p in pkgs_a.values()),
+        "total_bytes_b": sum(p["size_bytes"] for p in pkgs_b.values()),
+    }
 
 
 # ---------------------------------------------------------------------------

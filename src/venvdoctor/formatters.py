@@ -18,7 +18,6 @@ import json
 from datetime import datetime
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Human-readable sizes
 # ---------------------------------------------------------------------------
@@ -464,7 +463,7 @@ def to_html(report: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers (unchanged)
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 def _bar_color(pct: float) -> str:
@@ -473,11 +472,3 @@ def _bar_color(pct: float) -> str:
     if pct >= 10:
         return "#f7c26c"
     return "#40e0b0"
-
-
-def _grade_color(score: int) -> str:
-    if score >= 80:
-        return "#6cf799"
-    if score >= 50:
-        return "#f7c26c"
-    return "#f76c6c"

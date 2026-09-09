@@ -15,12 +15,12 @@ get_package_detail(name, venv_path=None) -> dict
 
 from __future__ import annotations
 
-import sys
 import importlib.metadata
+import sys
 from importlib.metadata import PathDistribution
 from pathlib import Path
-from typing import Optional
 
+from .conda import get_conda_package_detail, get_conda_packages, is_conda_env, normalize_name
 
 # ---------------------------------------------------------------------------
 # Types
@@ -119,7 +119,7 @@ def _get_requires(dist: PathDistribution) -> list[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_package_sizes(venv_path: Optional[Path] = None) -> list[PackageInfo]:
+def get_package_sizes(venv_path: Path | None = None) -> list[PackageInfo]:
     """
     Return a list of PackageInfo dicts for all installed packages.
 
@@ -131,9 +131,11 @@ def get_package_sizes(venv_path: Optional[Path] = None) -> list[PackageInfo]:
     """
     if venv_path is None:
         dists = importlib.metadata.distributions()
+        env_root = Path(sys.prefix)
     else:
         venv_path = Path(venv_path)
         dists = _distributions_for_venv(venv_path)
+        env_root = venv_path
 
     package_sizes: dict[str, PackageInfo] = {}
 
@@ -157,12 +159,33 @@ def get_package_sizes(venv_path: Optional[Path] = None) -> list[PackageInfo]:
                     size_bytes=size,
                 )
 
+    _merge_conda_packages(package_sizes, env_root)
+
     return list(package_sizes.values())
+
+
+def _merge_conda_packages(package_sizes: dict[str, PackageInfo], env_root: Path) -> None:
+    """
+    Add conda-only packages (no pip-style dist-info) into *package_sizes*
+    in place, skipping any name already covered by a dist-info entry.
+    """
+    if not is_conda_env(env_root):
+        return
+
+    known = {normalize_name(n) for n in package_sizes}
+    for conda_pkg in get_conda_packages(env_root):
+        if normalize_name(conda_pkg["name"]) in known:
+            continue
+        package_sizes[conda_pkg["name"]] = PackageInfo(
+            name=conda_pkg["name"],
+            version=conda_pkg["version"],
+            size_bytes=conda_pkg["size_bytes"],
+        )
 
 
 def get_package_detail(
     package_name: str,
-    venv_path: Optional[Path] = None,
+    venv_path: Path | None = None,
 ) -> dict:
     """
     Return detailed info for a single package by name.
@@ -173,9 +196,11 @@ def get_package_detail(
     """
     if venv_path is None:
         dists = importlib.metadata.distributions()
+        env_root = Path(sys.prefix)
     else:
         venv_path = Path(venv_path)
         dists = _distributions_for_venv(venv_path)
+        env_root = venv_path
 
     for dist in dists:
         name = dist.metadata.get("Name", "Unknown")
@@ -197,11 +222,24 @@ def get_package_detail(
             "dependencies": requires,
         }
 
+    conda_pkg = get_conda_package_detail(env_root, package_name) if is_conda_env(env_root) else None
+    if conda_pkg is not None:
+        return {
+            "name": conda_pkg["name"],
+            "version": conda_pkg["version"],
+            "size_bytes": conda_pkg["size_bytes"],
+            "location": str(env_root),
+            "summary": f"Conda package (channel: {conda_pkg['channel'] or 'unknown'})",
+            "home_page": "",
+            "license": "",
+            "dependencies": conda_pkg["deps"],
+        }
+
     raise KeyError(f"Package '{package_name}' not found.")
 
 
 def get_dependency_tree(
-    venv_path: Optional[Path] = None,
+    venv_path: Path | None = None,
 ) -> dict[str, dict]:
     """
     Build a dependency tree mapping each package to its direct deps.
@@ -212,9 +250,11 @@ def get_dependency_tree(
     """
     if venv_path is None:
         dists = list(importlib.metadata.distributions())
+        env_root = Path(sys.prefix)
     else:
         venv_path = Path(venv_path)
         dists = list(_distributions_for_venv(venv_path))
+        env_root = venv_path
 
     tree: dict[str, dict] = {}
     for dist in dists:
@@ -226,4 +266,16 @@ def get_dependency_tree(
             "size_bytes": _calc_dist_size(dist),
             "deps": _get_requires(dist),
         }
+
+    if is_conda_env(env_root):
+        known = {normalize_name(n) for n in tree}
+        for conda_pkg in get_conda_packages(env_root):
+            if normalize_name(conda_pkg["name"]) in known:
+                continue
+            tree[conda_pkg["name"]] = {
+                "version": conda_pkg["version"],
+                "size_bytes": conda_pkg["size_bytes"],
+                "deps": conda_pkg["deps"],
+            }
+
     return tree
