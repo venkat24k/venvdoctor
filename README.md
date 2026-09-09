@@ -359,6 +359,31 @@ Environments       : 4
 
 ---
 
+## Export Duplicate Analysis
+
+Save the duplicate-package analysis as a machine-readable report instead of (or in addition to) the HTML dashboard.
+
+```bash
+venvdoctor scan "D:\Projects" --duplicates-report duplicates.json
+venvdoctor scan "D:\Projects" --duplicates-report duplicates.csv
+```
+
+The JSON report includes combined size and potential savings per package, with a per-environment breakdown. The CSV has one row per (package, environment) install.
+
+---
+
+## Compare Environments
+
+Diff the installed packages of two virtual environments directly.
+
+```bash
+venvdoctor compare "D:\Projects\ProjectA\venv" "D:\Projects\ProjectB\venv"
+```
+
+Shows packages only in A, only in B, and packages present in both with mismatched versions. Add `--json` for machine-readable output.
+
+---
+
 ## Cleanup Recommendations
 
 ```bash
@@ -429,15 +454,30 @@ CLI Interface (cli.py)
 
 ---
 
+# Development
+
+Install with dev dependencies (pytest, ruff) and run the test suite / linter:
+
+```bash
+pip install -e ".[dev]"
+pytest
+ruff check src/ tests/
+```
+
+---
+
 # Roadmap
 
 ## Planned
 
 Future Enhancements
 
-- Environment comparison
 - Interactive dashboard mode
-- Export duplicate analysis to JSON/CSV
+
+## Done
+
+- Environment comparison (`venvdoctor compare`)
+- Export duplicate analysis to JSON/CSV (`--duplicates-report`)
 
 ---
 

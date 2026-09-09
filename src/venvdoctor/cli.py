@@ -19,24 +19,24 @@ venvdoctor --package numpy          # info about a single package
 venvdoctor --outdated               # check PyPI for newer versions
 venvdoctor scan PATH                # scan a directory for all venvs
 venvdoctor scan PATH --duplicates   # find packages in multiple venvs
-venvdoctor scan PATH --duplicates-html FILE  # save duplicate HTML dashboard
+venvdoctor scan PATH --duplicates-html FILE    # save duplicate HTML dashboard
+venvdoctor scan PATH --duplicates-report FILE  # save duplicate report (.json/.csv)
 venvdoctor scan PATH --cleanup      # suggest old / large venvs to remove
+venvdoctor compare VENV_A VENV_B    # diff installed packages between two venvs
 """
 
 from __future__ import annotations
 
-import sys
-import json
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 
-from .package_analyzer import get_package_sizes, get_package_detail, get_dependency_tree
-from .formatters import human_size, to_json, to_csv, to_html
-from .formatters_duplicates import to_duplicates_html
-from .tree import print_tree, largest_deps
-from .scanner import scan_all, duplicate_packages, cleanup_candidates
-
+from .formatters import human_size, to_csv, to_html, to_json
+from .formatters_duplicates import to_duplicates_csv, to_duplicates_html, to_duplicates_json
+from .package_analyzer import get_dependency_tree, get_package_detail, get_package_sizes
+from .scanner import cleanup_candidates, compare_venvs, duplicate_packages, scan_all
+from .tree import largest_deps, print_tree
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -190,7 +190,10 @@ def cmd_report(args) -> None:
         _do_html(packages, total_bytes, venv_path, out_path, args)
 
     else:
-        print(f"[error] Unknown report format '{suffix}'. Use .json, .csv, or .html", file=sys.stderr)
+        print(
+            f"[error] Unknown report format '{suffix}'. Use .json, .csv, or .html",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -323,17 +326,22 @@ def cmd_outdated(args) -> None:
     _header("Checking for Outdated Packages")
     print(f"  Querying PyPI for {len(packages)} packages (this may take a moment)…\n")
 
-    results = check_outdated(packages, verbose=True)
+    results, failed = check_outdated(packages, verbose=True)
 
     if not results:
         print("  ✅ All packages are up to date!")
-        return
+    else:
+        print(f"\n  Found {len(results)} outdated package(s):\n")
+        print(f"  {'Package':<30} {'Installed':>12} {'Latest':>12}")
+        print(f"  {'-'*30} {'-'*12} {'-'*12}")
+        for r in results:
+            print(f"  {r['name']:<30} {r['installed']:>12} → {r['latest']:>10}")
 
-    print(f"\n  Found {len(results)} outdated package(s):\n")
-    print(f"  {'Package':<30} {'Installed':>12} {'Latest':>12}")
-    print(f"  {'-'*30} {'-'*12} {'-'*12}")
-    for r in results:
-        print(f"  {r['name']:<30} {r['installed']:>12} → {r['latest']:>10}")
+    if failed:
+        print(
+            f"\n  ⚠️  Could not check {len(failed)} package(s) "
+            f"(network error, not necessarily up to date): {', '.join(failed)}"
+        )
 
 
 # ── scan ────────────────────────────────────────────────────────────────────
@@ -354,11 +362,10 @@ def cmd_scan(args) -> None:
         print("  No virtual environments found.")
         return
 
-    # ── Duplicates HTML mode (must be before terminal duplicates) ──
-        # ── Duplicates HTML mode ──
+    # ── Duplicates HTML mode ──
     if args.duplicates_html:
         dupes = duplicate_packages(summaries)
-        venv_paths = [s['path'] for s in summaries]
+        venv_paths = [s["path"] for s in summaries]
         html = to_duplicates_html(
             duplicates=dupes,
             scan_path=str(root),
@@ -368,6 +375,27 @@ def cmd_scan(args) -> None:
         out_path = Path(args.duplicates_html)
         out_path.write_text(html, encoding="utf-8")
         print(f"Duplicate Package Dashboard saved to: {out_path}")
+        return
+
+    # ── Duplicates JSON/CSV report mode ──
+    if args.duplicates_report:
+        dupes = duplicate_packages(summaries)
+        out_path = Path(args.duplicates_report)
+        suffix = out_path.suffix.lower()
+
+        if suffix == ".csv":
+            out_path.write_text(to_duplicates_csv(dupes), encoding="utf-8")
+        elif suffix in (".json", ""):
+            content = to_duplicates_json(dupes, scan_path=str(root), total_envs=len(summaries))
+            out_path.write_text(content, encoding="utf-8")
+        else:
+            print(
+                f"[error] Unknown report format '{suffix}'. Use .json or .csv",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        print(f"Duplicate Package report saved to: {out_path}")
         return
 
     # ── Duplicates mode ──
@@ -380,7 +408,11 @@ def cmd_scan(args) -> None:
             return
 
         total_wasted = 0
-        for name, entries in sorted(dupes.items(), key=lambda kv: -sum(e["size_bytes"] for e in kv[1])):
+        dupes_by_size = sorted(
+            dupes.items(),
+            key=lambda kv: -sum(e["size_bytes"] for e in kv[1]),
+        )
+        for name, entries in dupes_by_size:
             total_size = sum(e["size_bytes"] for e in entries)
             total_wasted += total_size
             # The "wasted" amount is all copies minus one (keep one canonical)
@@ -420,7 +452,11 @@ def cmd_scan(args) -> None:
 
     for s in summaries:
         pct = (s["total_bytes"] / total_all * 100) if total_all else 0
-        status = f"⚠️  last used {s['last_modified_days_ago']}d ago" if s["last_modified_days_ago"] > 90 else ""
+        status = (
+            f"⚠️  last used {s['last_modified_days_ago']}d ago"
+            if s["last_modified_days_ago"] > 90
+            else ""
+        )
         print(
             f"\n  {s['path']}\n"
             f"    Size    : {s['total_size_human']} ({pct:.1f}% of total)\n"
@@ -430,6 +466,47 @@ def cmd_scan(args) -> None:
         )
 
     print(f"\n  Total across all environments: {human_size(total_all)}")
+
+
+# ── compare ─────────────────────────────────────────────────────────────────
+
+def cmd_compare(args) -> None:
+    """Compare the installed packages of two virtual environments."""
+    venv_a = Path(args.venv_a)
+    venv_b = Path(args.venv_b)
+    for label, p in (("A", venv_a), ("B", venv_b)):
+        if not p.exists():
+            print(f"[error] Venv {label} path does not exist: {p}", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        result = compare_venvs(venv_a, venv_b)
+    except FileNotFoundError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        print(to_json(result))
+        return
+
+    _header("Environment Comparison")
+    print(f"  A: {result['venv_a']}  ({human_size(result['total_bytes_a'])})")
+    print(f"  B: {result['venv_b']}  ({human_size(result['total_bytes_b'])})")
+
+    _header(f"Only in A ({len(result['only_in_a'])})")
+    for p in result["only_in_a"]:
+        print(f"  {p['name']:<30} v{p['version']:<15} {human_size(p['size_bytes'])}")
+
+    _header(f"Only in B ({len(result['only_in_b'])})")
+    for p in result["only_in_b"]:
+        print(f"  {p['name']:<30} v{p['version']:<15} {human_size(p['size_bytes'])}")
+
+    mismatches = result["common_version_mismatch"]
+    _header(f"Version Mismatches ({len(mismatches)})")
+    for p in mismatches:
+        print(f"  {p['name']:<30} A: v{p['version_a']:<12} B: v{p['version_b']}")
+
+    print(f"\n  Common packages, same version: {len(result['common_same_version'])}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -455,8 +532,10 @@ Examples:
   venvdoctor --outdated               Check for outdated packages
   venvdoctor scan /path/to/projects   Scan directory for all venvs
   venvdoctor scan /path --duplicates  Find duplicated packages
-  venvdoctor scan /path --duplicates-html report.html  Save duplicate HTML dashboard
+  venvdoctor scan /path --duplicates-html report.html   Save duplicate HTML dashboard
+  venvdoctor scan /path --duplicates-report report.json Save duplicate report (.json/.csv)
   venvdoctor scan /path --cleanup     Cleanup recommendations
+  venvdoctor compare venvA venvB      Compare packages between two venvs
 """,
     )
 
@@ -526,6 +605,12 @@ Examples:
         help="Save duplicate packages HTML dashboard to FILE.",
     )
     scan_parser.add_argument(
+        "--duplicates-report",
+        dest="duplicates_report",
+        metavar="FILE",
+        help="Save duplicate packages report to FILE (.json / .csv).",
+    )
+    scan_parser.add_argument(
         "--cleanup",
         action="store_true",
         help="Suggest old or large environments to remove.",
@@ -537,6 +622,18 @@ Examples:
         default=90,
         metavar="N",
         help="Days threshold for cleanup recommendations (default: 90).",
+    )
+
+    # ── compare sub-command ──
+    compare_parser = sub.add_parser(
+        "compare", help="Compare installed packages between two virtual environments."
+    )
+    compare_parser.add_argument("venv_a", metavar="VENV_A", help="First environment path.")
+    compare_parser.add_argument("venv_b", metavar="VENV_B", help="Second environment path.")
+    compare_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the comparison as JSON.",
     )
 
     return parser
@@ -553,6 +650,11 @@ def main() -> None:
     # ── scan sub-command ──
     if args.subcommand == "scan":
         cmd_scan(args)
+        return
+
+    # ── compare sub-command ──
+    if args.subcommand == "compare":
+        cmd_compare(args)
         return
 
     # ── Feature flags (non-default modes) ──

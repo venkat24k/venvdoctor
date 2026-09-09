@@ -15,12 +15,9 @@ get_package_detail(name, venv_path=None) -> dict
 
 from __future__ import annotations
 
-import sys
 import importlib.metadata
 from importlib.metadata import PathDistribution
 from pathlib import Path
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Types
@@ -119,7 +116,7 @@ def _get_requires(dist: PathDistribution) -> list[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_package_sizes(venv_path: Optional[Path] = None) -> list[PackageInfo]:
+def get_package_sizes(venv_path: Path | None = None) -> list[PackageInfo]:
     """
     Return a list of PackageInfo dicts for all installed packages.
 
@@ -162,7 +159,7 @@ def get_package_sizes(venv_path: Optional[Path] = None) -> list[PackageInfo]:
 
 def get_package_detail(
     package_name: str,
-    venv_path: Optional[Path] = None,
+    venv_path: Path | None = None,
 ) -> dict:
     """
     Return detailed info for a single package by name.
@@ -201,7 +198,7 @@ def get_package_detail(
 
 
 def get_dependency_tree(
-    venv_path: Optional[Path] = None,
+    venv_path: Path | None = None,
 ) -> dict[str, dict]:
     """
     Build a dependency tree mapping each package to its direct deps.

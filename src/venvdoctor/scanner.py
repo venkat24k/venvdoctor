@@ -8,19 +8,17 @@ Public API
 find_venvs(root)                 -> list[Path]
 scan_all(root)                   -> list[VenvSummary]
 duplicate_packages(summaries)    -> dict[str, list[dict]]
+compare_venvs(venv_a, venv_b)    -> dict
 cleanup_candidates(summaries, days_old) -> list[dict]
 """
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
-from typing import Optional
 
-from .package_analyzer import get_package_sizes
 from .formatters import human_size
-
+from .package_analyzer import get_package_sizes
 
 # ---------------------------------------------------------------------------
 # Types
@@ -169,6 +167,74 @@ def duplicate_packages(
             })
 
     return {name: entries for name, entries in index.items() if len(entries) > 1}
+
+
+# ---------------------------------------------------------------------------
+# Environment comparison
+# ---------------------------------------------------------------------------
+
+def compare_venvs(venv_a: str | Path, venv_b: str | Path) -> dict:
+    """
+    Compare the installed packages of two virtual environments.
+
+    Raises
+    ------
+    FileNotFoundError  if either path is not a valid virtual environment
+    (propagated from get_package_sizes).
+    """
+    venv_a = Path(venv_a)
+    venv_b = Path(venv_b)
+
+    pkgs_a = {p["name"]: p for p in get_package_sizes(venv_a)}
+    pkgs_b = {p["name"]: p for p in get_package_sizes(venv_b)}
+
+    names_a = set(pkgs_a)
+    names_b = set(pkgs_b)
+
+    only_in_a = [
+        {
+            "name": n,
+            "version": pkgs_a[n].get("version", "unknown"),
+            "size_bytes": pkgs_a[n]["size_bytes"],
+        }
+        for n in sorted(names_a - names_b)
+    ]
+    only_in_b = [
+        {
+            "name": n,
+            "version": pkgs_b[n].get("version", "unknown"),
+            "size_bytes": pkgs_b[n]["size_bytes"],
+        }
+        for n in sorted(names_b - names_a)
+    ]
+
+    common_same_version: list[dict] = []
+    common_version_mismatch: list[dict] = []
+    for name in sorted(names_a & names_b):
+        version_a = pkgs_a[name].get("version", "unknown")
+        version_b = pkgs_b[name].get("version", "unknown")
+        entry = {
+            "name": name,
+            "version_a": version_a,
+            "version_b": version_b,
+            "size_bytes_a": pkgs_a[name]["size_bytes"],
+            "size_bytes_b": pkgs_b[name]["size_bytes"],
+        }
+        if version_a == version_b:
+            common_same_version.append(entry)
+        else:
+            common_version_mismatch.append(entry)
+
+    return {
+        "venv_a": str(venv_a),
+        "venv_b": str(venv_b),
+        "only_in_a": only_in_a,
+        "only_in_b": only_in_b,
+        "common_same_version": common_same_version,
+        "common_version_mismatch": common_version_mismatch,
+        "total_bytes_a": sum(p["size_bytes"] for p in pkgs_a.values()),
+        "total_bytes_b": sum(p["size_bytes"] for p in pkgs_b.values()),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -11,12 +11,14 @@ detailed duplicate table — all self-contained (no external deps).
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import math
 from datetime import datetime
 from pathlib import Path
 
-from .formatters import human_size
+from .formatters import human_size, to_json
 
 
 def _short_path(path: str, max_len: int = 28) -> str:
@@ -33,6 +35,88 @@ def _wasted_bytes(entries: list[dict]) -> int:
         return 0
     biggest = max(e["size_bytes"] for e in entries)
     return sum(e["size_bytes"] for e in entries) - biggest
+
+
+def to_duplicates_json(
+    duplicates: dict[str, list[dict]],
+    scan_path: str,
+    generated_at: str = "",
+    total_envs: int = 0,
+) -> str:
+    """Return a machine-readable JSON report of duplicate packages."""
+    if not generated_at:
+        generated_at = datetime.now().isoformat(timespec="seconds")
+
+    sorted_pkgs = sorted(
+        duplicates.items(),
+        key=lambda kv: -sum(e["size_bytes"] for e in kv[1]),
+    )
+
+    dupes_out = []
+    total_combined = 0
+    total_wasted = 0
+    for name, entries in sorted_pkgs:
+        combined = sum(e["size_bytes"] for e in entries)
+        wasted = _wasted_bytes(entries)
+        total_combined += combined
+        total_wasted += wasted
+        dupes_out.append({
+            "name": name,
+            "combined_bytes": combined,
+            "potential_savings_bytes": wasted,
+            "entries": [
+                {
+                    "venv": e["venv"],
+                    "version": e.get("version", "unknown"),
+                    "size_bytes": e["size_bytes"],
+                }
+                for e in entries
+            ],
+        })
+
+    data = {
+        "generated_at": generated_at,
+        "scan_path": scan_path,
+        "total_environments": total_envs,
+        "duplicate_package_count": len(dupes_out),
+        "total_combined_bytes": total_combined,
+        "total_potential_savings_bytes": total_wasted,
+        "duplicates": dupes_out,
+    }
+    return to_json(data)
+
+
+def to_duplicates_csv(duplicates: dict[str, list[dict]]) -> str:
+    """
+    Return a CSV report of duplicate packages, one row per
+    (package, environment) install.
+    """
+    sorted_pkgs = sorted(
+        duplicates.items(),
+        key=lambda kv: -sum(e["size_bytes"] for e in kv[1]),
+    )
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "name", "venv", "version", "size_bytes",
+        "combined_bytes", "potential_savings_bytes",
+    ])
+
+    for name, entries in sorted_pkgs:
+        combined = sum(e["size_bytes"] for e in entries)
+        wasted = _wasted_bytes(entries)
+        for e in entries:
+            writer.writerow([
+                name,
+                e["venv"],
+                e.get("version", "unknown"),
+                e["size_bytes"],
+                combined,
+                wasted,
+            ])
+
+    return buf.getvalue()
 
 
 def to_duplicates_html(
@@ -87,7 +171,6 @@ def to_duplicates_html(
 
     for pkg_name, entries in sorted_pkgs[:40]:
         env_map = {e["venv"]: e for e in entries}
-        row_vals: list[float] = []
         row_sizes: list[int] = []
         row_vers: list[str] = []
         for path in venv_paths:
@@ -193,7 +276,7 @@ def to_duplicates_html(
 
     # ── Detail table rows ──
     detail_rows = ""
-    for idx, (pkg_name, entries) in enumerate(sorted_pkgs):
+    for _idx, (pkg_name, entries) in enumerate(sorted_pkgs):
         combined = sum(e["size_bytes"] for e in entries)
         wasted = _wasted_bytes(entries)
         waste_pct = (wasted / combined * 100) if combined else 0

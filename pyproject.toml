@@ -14,8 +14,27 @@ keywords = ["virtualenv", "venv", "packages", "cli", "devtools"]
 # No third-party runtime dependencies — stdlib only.
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
 [project.scripts]
 venvdoctor = "venvdoctor.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules are mostly embedded HTML/CSS/JS template strings, not
+# line-length-sensitive Python logic.
+"src/venvdoctor/formatters.py" = ["E501"]
+"src/venvdoctor/formatters_duplicates.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
